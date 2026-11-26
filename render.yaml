@@ -1,0 +1,14 @@
+# Render blueprint: one background worker that runs the Avron writer.
+services:
+  - type: worker
+    name: avron-writer
+    runtime: python
+    plan: starter
+    branch: avron-x-merger
+    buildCommand: "true"
+    startCommand: bash render/worker.sh
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
