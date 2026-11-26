@@ -12,7 +12,8 @@ Goal: one clear thread per hour that tells an ordinary Indian retail investor wh
 1. Breaking or market-moving news (global and Indian)
 2. Big institutional moves: brokerage target calls, bulk and block deals, FII/DII moves
 3. Company filings that matter: big orders, results, dividends, acquisitions, deals
-4. Anything that directly touches retail investors: dividends, record dates, IPOs, rules, taxes, loans, fuel and food prices
+4. IPO news: if an IPO deep-dive thread went out in the last hour, give it one line in the digest (name, dates, price band) and say a full explainer was just posted.
+5. Anything that directly touches retail investors: dividends, record dates, IPOs, rules, taxes, loans, fuel and food prices
 
 **Voice: a sharp friend, not a press release**
 - Write like a friendly market-savvy Indian talking to a friend over chai. Calm, clear, a little warm.

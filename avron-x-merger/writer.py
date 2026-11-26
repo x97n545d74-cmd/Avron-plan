@@ -19,6 +19,7 @@ import datetime
 import json
 import os
 import pathlib
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -50,6 +51,8 @@ TARGET_MAX_CALLS = 20
 DEAL_HOURS = (9, 19)     # India time: one "who bought, who sold" list after each of these hours
 DEAL_MAX = 15
 STORY_HOURS = (9, 13, 19)   # India time: one business story after each of these hours
+IPO_HOURS = (10, 15, 20)    # India time: one IPO deep dive after each of these hours
+IPO_POSTS = 8              # posts in one IPO thread
 STATE = pathlib.Path(os.environ.get("AVRON_STATE", "/tmp/avron_x_merger_state.json"))
 FEED_TOKENS = 10000     # how much of the feed Claude reads (newest items come first)
 DOC_TOKENS = 6000       # how much of each filing Claude reads
@@ -617,6 +620,98 @@ def run_story(now, api_key):
     print(" -", headline)
 
 
+# ---------------------------------------------------------------- lane 5: IPO deep dive
+IPO_BANNED = re.compile(r"\b(subscribe|apply for (it|this)|should apply|must apply|do not apply|don't apply|avoid (it|this)|"
+                        r"buy (it|this)|sell (it|this)|we recommend|recommend)\b", re.I)
+
+
+def ipo_prompt(now, covered):
+    done = "\n".join("- " + c for c in covered) if covered else "(nothing yet)"
+    return "\n".join([
+        "You explain Indian IPOs to ordinary retail investors who are new to the stock market.",
+        "Today's date in India is: " + now.strftime("%d-%b-%Y"),
+        "",
+        "Search the web and pick ONE mainboard or SME IPO that is open for bidding today, opens in the next 7 days, "
+        "or listed in the last 3 days. Prefer the one retail investors are talking about most. "
+        "Confirm the key facts (dates, price band, issue size, financials) in at least two publications "
+        "or in the company's own offer document. Look across: " + OUTLETS + ", plus Chittorgarh and the exchanges' IPO pages.",
+        "Do not pick any of these, which were already explained:",
+        done,
+        'If there is truly no suitable IPO right now, reply with exactly {"none": true}.',
+        "",
+        "Write the WHOLE deep dive as a thread of exactly %d posts, each at most 262 characters, in simple everyday English "
+        "that a 15-year-old could follow. Explain any term in a few words the first time you use it." % IPO_POSTS,
+        "Post 1 (hook): company name, what it does in plain words, the open and close dates, the price band and the issue size. "
+        "End with a line that promises the explanation.",
+        "Post 2 (the business): what it sells, who pays it, and how it makes money, with one real example a normal person knows.",
+        "Post 3 (the numbers): revenue and profit for the last 2 to 3 periods as reported, and whether they are rising or falling. "
+        "Say plainly if it makes a loss.",
+        "Post 4 (why raise money): how much is a fresh issue (money goes to the company) and how much is an offer for sale "
+        "(money goes to existing owners), and what the company says it will use the money for.",
+        "Post 5 (the price): the valuation the price band implies, compared with listed peers, in plain words "
+        "(cheaper, similar or more expensive than peers). Mention the grey market premium only if a reliable outlet reports it, "
+        "and say it is unofficial and can change.",
+        "Post 6 (the moat): what protects this business from competitors, and how easy or hard it is for a new player to copy it. "
+        "Cover the industry as a whole: is it crowded, who are the big rivals, does the company have anything hard to copy "
+        "(brand, cost advantage, licences, customers who cannot easily switch)? Say honestly if there is no real moat.",
+        "Post 7 (future visibility): what the company or the reports say about growth: order book, demand, new capacity, "
+        "targets or guidance management has stated (revenue targets, margin targets). Attribute targets as the company's own "
+        "statements. Say how much of the future is visible and how much depends on luck or the economy.",
+        "Post 8 (risks and our read): the 2 biggest risks in plain words, then our read in exactly this form: "
+        "'Our read: Business quality: <Strong, Average or Weak>. Price: <Rich, Fair or Cheap versus peers>. "
+        "Risk: <Low, Medium or High>.' then one plain sentence that sums it up, then the words 'Not investment advice.'",
+        "",
+        "Rules: use ONLY facts you found, with numbers, years and units exactly as reported; never guess or calculate a figure "
+        "yourself. Write in your own words; never copy a publication's sentences. Do NOT tell anyone to subscribe, apply, avoid, "
+        "buy or sell, and do not predict the listing price or the share price. Judge the business and the price, not what the reader "
+        "should do. No hashtags, no emojis, no links, no numbering, and do not name the publications.",
+        "",
+        "Reply with ONLY one JSON object and nothing else:",
+        '"company": the company name',
+        '"headline": UPPER CASE title that includes the company name and says IPO, at most 100 characters',
+        '"thread": a list of the %d posts in order' % IPO_POSTS,
+        '"link": the URL of the article or document you relied on most',
+    ])
+
+
+def ipo_due(now):
+    if not slot_due(now, "ipo", IPO_HOURS):
+        return False
+    return now.timestamp() - load_state().get("last_ipo_try", 0) >= 55 * 60     # if nothing suitable was found, wait an hour
+
+
+def run_ipo(now, api_key):
+    mark_state("last_ipo_try", now.timestamp())
+    covered = [r.get("company") or r.get("headline") for r in read_queue() if r.get("lane") == "ipo"][-40:]
+    text, tin, tout = call_claude(ipo_prompt(now, covered), api_key, search_tool(6), 10000, advanced=True)
+    obj = parse_object(text)
+    if obj and obj.get("none"):
+        print("[ipo] No suitable IPO right now. Tokens in/out: %d / %d" % (tin, tout))
+        return
+    thread = [clean(t, 400) for t in (obj or {}).get("thread") or [] if clean(t, 400)]
+    link = str((obj or {}).get("link") or "").strip()
+    headline = clean((obj or {}).get("headline"), 120)
+    total = len(thread)
+    thread = ["%s (%d/%d)" % (t, i + 1, total) for i, t in enumerate(thread)]
+    joined = " ".join(thread)
+    bad = (not obj or total != IPO_POSTS or any(len(t) > 280 for t in thread) or not headline or not link.startswith("http")
+           or "Not investment advice." not in thread[-1] or "Our read:" not in thread[-1]
+           or "http" in joined or "#" in joined or IPO_BANNED.search(joined))
+    if bad:
+        print("[ipo] Reply was not usable. Nothing saved. Tokens in/out: %d / %d. Reply began: %r" % (tin, tout, text[:300]))
+        return
+    row = {
+        "id": "%s-I01" % now.strftime("%Y%m%d-%H%M"), "created_ist": now.strftime("%Y-%m-%d %H:%M"), "lane": "ipo",
+        "company": clean(obj.get("company"), 80), "headline": headline, "detail": "", "post_text": thread[0],
+        "thread": thread, "story_text": "\n\n".join(t.rsplit(" (", 1)[0] for t in thread),
+        "verify_link": link, "document_read": True,
+    }
+    append_rows([row])
+    print("[ipo] Appended 1 (%d posts). Tokens in/out: %d / %d" % (len(thread), tin, tout))
+    print(" -", headline)
+
+
+
 # ---------------------------------------------------------------- lane 4: brokerage targets
 def targets_prompt(now, covered):
     done = "\n".join("- " + c for c in covered) if covered else "(nothing yet)"
@@ -916,6 +1011,8 @@ def main():
         plan.append(("filing", run_filings))
     if only == "story" or (not only and story_due(now)):
         plan.append(("story", run_story))
+    if only == "ipo" or (not only and ipo_due(now)):
+        plan.append(("ipo", run_ipo))
     if only == "targets" or (not only and slot_due(now, "targets", TARGET_HOURS)):
         plan.append(("targets", run_targets))
     if only == "deals" or (not only and slot_due(now, "deals", DEAL_HOURS)):
