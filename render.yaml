@@ -5,6 +5,12 @@ services:
     runtime: python
     plan: starter
     branch: avron-x-merger
+    # Redeploy only when the worker itself changes. Without this filter every new
+    # headline or posted-log commit on the branch would restart the worker.
+    buildFilter:
+      paths:
+        - render.yaml
+        - render/**
     buildCommand: "true"
     startCommand: bash render/worker.sh
     envVars:
